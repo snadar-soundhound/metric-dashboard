@@ -1,6 +1,5 @@
 import json
 from collections import Counter
-from datetime import date
 from io import BytesIO
 from typing import Any
 
@@ -19,11 +18,11 @@ METRIC_CARDS = [
     ("Abandoned Within Amelia", "abandoned_amelia"),
     ("Contained Within Amelia", "contained"),
     ("Escalated to Agent", "escalated"),
-    ("Abandoned by Amelia", "abandoned_by_amelia"),
     ("Patient Abandoned Before Escal.", "patient_abandoned_before_esc"),
     ("Resolved", "resolved"),
     ("Partially Resolved", "partially_resolved"),
     ("Unresolved", "unresolved"),
+    ("Authentication Success", "auth_success"),
     ("Avg Handle Time", "avg_handle_time"),
     ("Avg Satisfaction", "avg_satisfaction"),
     ("Avg Answer Speed", "avg_answer_speed"),
@@ -33,7 +32,6 @@ CATEGORY_LABELS = {k: v for v, k in METRIC_CARDS}
 CATEGORY_OPTIONS = [("All", "all")] + METRIC_CARDS
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
 def normalize_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -148,7 +146,12 @@ def parse_metrics(data: list[dict]) -> dict:
     metric_buckets = {
         k: []
         for _, k in METRIC_CARDS
-        if k not in {"avg_handle_time", "avg_satisfaction", "avg_answer_speed"}
+        if k not in {
+            "avg_handle_time",
+            "avg_satisfaction",
+            "avg_answer_speed",
+            "auth_success",
+        }
     }
 
     handle_times = []
@@ -167,17 +170,25 @@ def parse_metrics(data: list[dict]) -> dict:
         m, cm = build_metric_maps(conv)
 
         abandoned = get_first(m, ["abandoned", "Abandoned"], None)
-        escalated = get_first(cm, ["ESCALATED", "Escalated", "escalated"], get_first(m, ["escalated", "Escalated"], False))
+        escalated = get_first(
+            cm,
+            ["ESCALATED", "Escalated", "escalated"],
+            get_first(m, ["escalated", "Escalated"], False),
+        )
         escalated = normalize_bool(escalated)
 
         caller = get_first(
             cm,
             ["Caller Number", "CallerNumber", "caller_number"],
-            get_first(m, ["Caller Number", "CallerNumber", "caller_number"], "")
+            get_first(m, ["Caller Number", "CallerNumber", "caller_number"], ""),
         )
 
         handle_time = normalize_number(
-            get_first(m, ["totalHandleTime", "total_handle_time", "TotalHandleTime", "total_handleTime"], 0),
+            get_first(
+                m,
+                ["totalHandleTime", "total_handle_time", "TotalHandleTime", "total_handleTime"],
+                0,
+            ),
             0.0,
         )
         satisfaction = normalize_number(
@@ -187,7 +198,9 @@ def parse_metrics(data: list[dict]) -> dict:
         answer_speed = normalize_number(get_first(m, ["amelia_answer_speed"], 0), 0.0)
 
         resolution_status = str(get_first(m, ["resolution_status"], "UNKNOWN")).strip().upper()
-        user_intent = str(get_first(cm, ["userInitialIntent"], get_first(m, ["userInitialIntent"], ""))).strip()
+        user_intent = str(
+            get_first(cm, ["userInitialIntent"], get_first(m, ["userInitialIntent"], ""))
+        ).strip()
         channel = str(conv.get("initialChannel", "")).strip()
         conversation_id = str(conv.get("conversationId", "")).strip()
         created_at = str(conv.get("conversationCreated", "")).strip()
@@ -196,6 +209,9 @@ def parse_metrics(data: list[dict]) -> dict:
         abandoned_num = normalize_number(abandoned, -999)
         if float(abandoned_num).is_integer():
             abandoned_num = int(abandoned_num)
+
+        auth_value = str(get_first(cm, ["authentication"], get_first(m, ["authentication"], ""))).strip().lower()
+        auth_success = auth_value == "success"
 
         handle_times.append(handle_time)
         satisfaction_scores.append(satisfaction)
@@ -223,6 +239,8 @@ def parse_metrics(data: list[dict]) -> dict:
             "channel": channel,
             "created_at": created_at,
             "created_date": created_date,
+            "auth_value": auth_value,
+            "auth_success": auth_success,
             "raw": conv,
         }
 
@@ -235,8 +253,6 @@ def parse_metrics(data: list[dict]) -> dict:
             metric_buckets["contained"].append(entry)
         if escalated:
             metric_buckets["escalated"].append(entry)
-        if abandoned_num == 2:
-            metric_buckets["abandoned_by_amelia"].append(entry)
         if abandoned_num == 1 and escalated:
             metric_buckets["patient_abandoned_before_esc"].append(entry)
 
@@ -254,13 +270,20 @@ def parse_metrics(data: list[dict]) -> dict:
         "avg_handle_time": sum(handle_times) / len(handle_times) if handle_times else 0.0,
         "avg_satisfaction": sum(satisfaction_scores) / len(satisfaction_scores) if satisfaction_scores else 0.0,
         "avg_answer_speed": sum(answer_speeds) / len(answer_speeds) if answer_speeds else 0.0,
-        "total": len(metric_buckets["total"]),
+        "total": len(all_entries),
         "intent_counts": dict(intent_counts),
         "resolution_counts": dict(resolution_counts),
         "channel_counts": dict(channel_counts),
         "day_counts": dict(sorted(day_counts.items())),
         "available_dates": available_dates,
         "all_entries": all_entries,
+    }
+
+
+def compute_auth_metrics(entries: list[dict]) -> dict:
+    auth_success = sum(1 for e in entries if e.get("auth_success"))
+    return {
+        "auth_success": auth_success,
     }
 
 
@@ -273,6 +296,8 @@ def entries_for_selected_key(parsed: dict, selected_key: str) -> list[dict]:
         return sorted(parsed["all_entries"], key=lambda e: e.get("satisfaction_score", 0), reverse=True)
     if selected_key == "avg_answer_speed":
         return sorted(parsed["all_entries"], key=lambda e: e.get("answer_speed", 0), reverse=True)
+    if selected_key == "auth_success":
+        return [e for e in parsed["all_entries"] if e.get("auth_success")]
     return list(parsed["metrics"].get(selected_key, []))
 
 
@@ -286,6 +311,8 @@ def make_table(entries: list[dict]) -> pd.DataFrame:
                 "Intent": (e.get("intent") or "—").replace("_", " "),
                 "Resolution": e.get("resolution_status") or "—",
                 "Channel": e.get("channel") or "—",
+                "Authentication": e.get("auth_value") or "—",
+                "Auth Success": "Yes" if e.get("auth_success") else "No",
                 "Handle Time": e.get("handle_time_fmt") or "—",
                 "Satisfaction": round(float(e.get("satisfaction_score", 0)), 3),
                 "Answer Speed": e.get("answer_speed_fmt") or "—",
@@ -323,6 +350,7 @@ def filter_entries(
                 str(e.get("resolution_status", "")),
                 str(e.get("channel", "")),
                 str(e.get("created_date", "")),
+                str(e.get("auth_value", "")),
             ]
         ).lower()
         if search and search not in haystack:
@@ -331,13 +359,17 @@ def filter_entries(
     return out
 
 
-def metric_value(parsed: dict, key: str):
+def metric_value(parsed: dict, key: str, auth_metrics: dict | None = None):
+    auth_metrics = auth_metrics or {}
+
     if key == "avg_handle_time":
         return fmt_time(parsed["avg_handle_time"])
     if key == "avg_satisfaction":
         return f"{parsed['avg_satisfaction']:.3f}"
     if key == "avg_answer_speed":
         return f"{parsed['avg_answer_speed']:.1f}s"
+    if key == "auth_success":
+        return str(auth_metrics.get("auth_success", 0))
     if key == "all":
         return str(len(parsed["all_entries"]))
     return str(len(parsed["metrics"].get(key, [])))
@@ -350,11 +382,11 @@ def metric_help() -> pd.DataFrame:
             ["Abandoned Within Amelia", "User dropped while Amelia was handling the conversation", "abandoned = 1 AND not escalated"],
             ["Contained Within Amelia", "Conversation completed within Amelia without escalation", "abandoned = 0 AND not escalated"],
             ["Escalated to Agent", "Conversation was transferred to a human agent", "escalated = True"],
-            ["Abandoned by Amelia", "System ended the interaction", "abandoned = 2"],
             ["Patient Abandoned Before Escal.", "User dropped after escalation was flagged", "abandoned = 1 AND escalated = True"],
             ["Resolved", "Conversation fully resolved", 'resolution_status = "RESOLVED"'],
             ["Partially Resolved", "Conversation partially resolved", 'resolution_status = "PARTIALLY_RESOLVED"'],
             ["Unresolved", "Conversation did not resolve the issue", 'resolution_status = "UNRESOLVED"'],
+            ["Authentication Success", 'Conversation has authentication metric with value "success"', 'authentication = "success"'],
             ["Avg Handle Time", "Average conversation duration", "sum(handle_time) / total conversations"],
             ["Avg Satisfaction", "Average user satisfaction score", "sum(satisfaction_score) / total conversations"],
             ["Avg Answer Speed", "Average Amelia response speed", "sum(amelia_answer_speed) / total conversations"],
@@ -396,7 +428,13 @@ def add_theme():
     )
 
 
-def build_pdf_report(parsed: dict, filtered_entries: list[dict], selected_label: str, selected_date) -> bytes:
+def build_pdf_report(
+    parsed: dict,
+    filtered_entries: list[dict],
+    selected_label: str,
+    selected_date,
+    auth_metrics: dict,
+) -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -414,6 +452,7 @@ def build_pdf_report(parsed: dict, filtered_entries: list[dict], selected_label:
         fontSize=22,
         spaceAfter=10,
     )
+
     story = []
     story.append(Paragraph("Amelia Conversation Intelligence Report", title_style))
     story.append(Paragraph(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
@@ -424,48 +463,90 @@ def build_pdf_report(parsed: dict, filtered_entries: list[dict], selected_label:
 
     summary_rows = [["Metric", "Value"]]
     for label, key in METRIC_CARDS:
-        summary_rows.append([label, metric_value(parsed, key)])
+        summary_rows.append([label, metric_value(parsed, key, auth_metrics)])
 
     summary_table = Table(summary_rows, colWidths=[10 * cm, 5 * cm])
-    summary_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F8EF7")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#2A2D3E")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#F5F7FB"), colors.white]),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-    ]))
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F8EF7")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#2A2D3E")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#F5F7FB"), colors.white]),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ]
+        )
+    )
     story.append(summary_table)
     story.append(Spacer(1, 14))
 
+    auth_rows = [
+        ["Authentication Metric", "Value"],
+        ["Authentication Success", str(auth_metrics.get("auth_success", 0))],
+    ]
+    auth_table = Table(auth_rows, colWidths=[8.5 * cm, 4.0 * cm])
+    auth_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1D27")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7DFEA")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FB")]),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ]
+        )
+    )
+    story.append(Paragraph("Authentication Summary", styles["Heading2"]))
+    story.append(auth_table)
+    story.append(Spacer(1, 12))
+
     table_df = make_table(filtered_entries)
     max_rows = min(len(table_df), 60)
-    data_rows = [["Caller Number", "Conversation ID", "Intent", "Resolution", "Handle Time", "Created"]]
+    data_rows = [["Caller Number", "Conversation ID", "Intent", "Resolution", "Authentication", "Handle Time", "Created"]]
     for _, row in table_df.head(max_rows).iterrows():
-        data_rows.append([
-            str(row["Caller Number"]),
-            str(row["Conversation ID"]),
-            str(row["Intent"]),
-            str(row["Resolution"]),
-            str(row["Handle Time"]),
-            str(row["Created"]),
-        ])
+        data_rows.append(
+            [
+                str(row["Caller Number"]),
+                str(row["Conversation ID"]),
+                str(row["Intent"]),
+                str(row["Resolution"]),
+                str(row["Authentication"]),
+                str(row["Handle Time"]),
+                str(row["Created"]),
+            ]
+        )
 
-    convo_table = Table(data_rows, repeatRows=1, colWidths=[3.2 * cm, 5.0 * cm, 4.0 * cm, 3.5 * cm, 2.5 * cm, 2.7 * cm])
-    convo_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1D27")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7DFEA")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FB")]),
-        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
+    convo_table = Table(
+        data_rows,
+        repeatRows=1,
+        colWidths=[3.0 * cm, 4.8 * cm, 4.0 * cm, 3.2 * cm, 3.0 * cm, 2.2 * cm, 2.5 * cm],
+    )
+    convo_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1D27")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7DFEA")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FB")]),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
     story.append(Paragraph("Filtered Conversations", styles["Heading2"]))
     story.append(convo_table)
+
     if len(table_df) > max_rows:
         story.append(Spacer(1, 8))
-        story.append(Paragraph(f"Note: PDF includes first {max_rows} filtered conversations out of {len(table_df)}.", styles["Italic"]))
+        story.append(
+            Paragraph(
+                f"Note: PDF includes first {max_rows} filtered conversations out of {len(table_df)}.",
+                styles["Italic"],
+            )
+        )
 
     doc.build(story)
     pdf_bytes = buffer.getvalue()
@@ -473,7 +554,6 @@ def build_pdf_report(parsed: dict, filtered_entries: list[dict], selected_label:
     return pdf_bytes
 
 
-# ── App ─────────────────────────────────────────────────────────────────────
 def main():
     add_theme()
     st.title("🤖 Amelia Conversation Intelligence")
@@ -483,7 +563,9 @@ def main():
         st.header("Upload & Filters")
         uploaded = st.file_uploader("Upload conversation JSON", type=["json"])
         st.markdown("---")
-        st.write("The dashboard supports metric focus, search, date filtering, transcript exploration, CSV download, and PDF export.")
+        st.write(
+            "The dashboard supports metric focus, search, date filtering, transcript exploration, CSV download, and PDF export."
+        )
 
     if not uploaded:
         st.info("Upload a JSON file from the sidebar to generate the dashboard.")
@@ -526,27 +608,37 @@ def main():
         intent_filter = st.multiselect("Intent", options=intent_options)
 
     base_entries = entries_for_selected_key(parsed, selected_key)
-    filtered_entries = filter_entries(base_entries, search, resolution_filter, channel_filter, intent_filter, selected_date)
+    filtered_entries = filter_entries(
+        base_entries,
+        search,
+        resolution_filter,
+        channel_filter,
+        intent_filter,
+        selected_date,
+    )
+    auth_metrics = compute_auth_metrics(filtered_entries)
     selected_label = "All" if selected_key == "all" else CATEGORY_LABELS[selected_key]
 
-    tab_dashboard, tab_explorer, tab_definitions = st.tabs(["Dashboard", "Conversation Explorer", "Metric Definitions"])
+    tab_dashboard, tab_explorer, tab_definitions = st.tabs(
+        ["Dashboard", "Conversation Explorer", "Metric Definitions"]
+    )
 
     with tab_dashboard:
-        cols = st.columns(4)
-        for idx, (label, key) in enumerate(METRIC_CARDS[:4]):
-            with cols[idx]:
-                kpi_card(label, metric_value(parsed, key))
-        cols = st.columns(4)
-        for idx, (label, key) in enumerate(METRIC_CARDS[4:8]):
-            with cols[idx]:
-                kpi_card(label, metric_value(parsed, key))
-        cols = st.columns(4)
-        for idx, (label, key) in enumerate(METRIC_CARDS[8:12]):
-            with cols[idx]:
-                kpi_card(label, metric_value(parsed, key))
+        for start in range(0, len(METRIC_CARDS), 4):
+            cols = st.columns(4)
+            for idx, (label, key) in enumerate(METRIC_CARDS[start : start + 4]):
+                with cols[idx]:
+                    kpi_card(label, metric_value(parsed, key, auth_metrics))
 
         st.markdown("### Active Filter")
-        st.info(f"Showing **{selected_label}** conversations | Date: **{selected_date if selected_date else 'All dates'}** | Rows: **{len(filtered_entries)}**")
+        st.info(
+            f"Showing **{selected_label}** conversations | "
+            f"Date: **{selected_date if selected_date else 'All dates'}** | "
+            f"Rows: **{len(filtered_entries)}**"
+        )
+
+        st.markdown("### Authentication Summary")
+        st.metric("Authentication Success", auth_metrics["auth_success"])
 
         chart_col1, chart_col2 = st.columns(2)
         call_dist = pd.DataFrame(
@@ -555,18 +647,17 @@ def main():
                     "Abandoned (Amelia)",
                     "Contained",
                     "Escalated",
-                    "Abandoned by Amelia",
                     "Patient Abandoned",
                 ],
                 "Count": [
                     len(parsed["metrics"]["abandoned_amelia"]),
                     len(parsed["metrics"]["contained"]),
                     len(parsed["metrics"]["escalated"]),
-                    len(parsed["metrics"]["abandoned_by_amelia"]),
                     len(parsed["metrics"]["patient_abandoned_before_esc"]),
                 ],
             }
         )
+
         with chart_col1:
             fig = px.pie(call_dist, names="Category", values="Count", title="Call Distribution", hole=0.35)
             fig.update_traces(hovertemplate="%{label}: %{value}<extra></extra>")
@@ -615,7 +706,9 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
 
         st.subheader(f"Filtered Conversations — {selected_label}")
-        st.caption("Use the sidebar to switch between All or a specific metric, then optionally narrow by date, resolution, channel, or intent.")
+        st.caption(
+            "Use the sidebar to switch between All or a specific metric, then optionally narrow by date, resolution, channel, and intent."
+        )
         df = make_table(filtered_entries)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -630,7 +723,13 @@ def main():
                 use_container_width=True,
             )
         with action_col2:
-            pdf_bytes = build_pdf_report(parsed, filtered_entries, selected_label, selected_date)
+            pdf_bytes = build_pdf_report(
+                parsed,
+                filtered_entries,
+                selected_label,
+                selected_date,
+                auth_metrics,
+            )
             st.download_button(
                 "Download PDF report",
                 data=pdf_bytes,
@@ -642,7 +741,11 @@ def main():
     with tab_explorer:
         st.subheader("Conversation Explorer")
         explorer_search = st.text_input("Find a conversation by ID or phone number", key="explorer_search")
-        matching_entries = filter_entries(all_entries, explorer_search, [], [], [], None) if explorer_search else all_entries
+        matching_entries = (
+            filter_entries(all_entries, explorer_search, [], [], [], None)
+            if explorer_search
+            else all_entries
+        )
         explorer_df = make_table(matching_entries)
         st.dataframe(explorer_df, use_container_width=True, hide_index=True, height=320)
 
@@ -659,7 +762,11 @@ def main():
                 "Select conversation",
                 options=list(range(len(matching_entries))),
                 index=default_idx,
-                format_func=lambda i: f"{matching_entries[i].get('conversation_id') or 'No ID'} | {matching_entries[i].get('caller') or 'No phone'} | {matching_entries[i].get('intent') or 'No intent'}",
+                format_func=lambda i: (
+                    f"{matching_entries[i].get('conversation_id') or 'No ID'} | "
+                    f"{matching_entries[i].get('caller') or 'No phone'} | "
+                    f"{matching_entries[i].get('intent') or 'No intent'}"
+                ),
             )
             selected_entry = matching_entries[selected_index]
 
@@ -669,6 +776,10 @@ def main():
             top2.metric("Caller Number", selected_entry.get("caller") or "—")
             top3.metric("Resolution", selected_entry.get("resolution_status") or "—")
             top4.metric("Handle Time", selected_entry.get("handle_time_fmt") or "—")
+
+            top5, top6 = st.columns(2)
+            top5.metric("Authentication", selected_entry.get("auth_value") or "—")
+            top6.metric("Auth Success", "Yes" if selected_entry.get("auth_success") else "No")
 
             detail_tabs = st.tabs(["Transcript", "Summary", "Metrics", "Topics", "Raw JSON"])
             with detail_tabs[0]:
@@ -681,6 +792,8 @@ def main():
                         "intent": selected_entry.get("intent"),
                         "resolution_status": selected_entry.get("resolution_status"),
                         "channel": selected_entry.get("channel"),
+                        "authentication": selected_entry.get("auth_value"),
+                        "auth_success": selected_entry.get("auth_success"),
                         "handle_time": selected_entry.get("handle_time"),
                         "satisfaction_score": selected_entry.get("satisfaction_score"),
                         "answer_speed": selected_entry.get("answer_speed"),
@@ -705,7 +818,8 @@ def main():
             - **All** shows every conversation in the uploaded file.
             - **Metric focus** narrows the table to only that category, such as *Contained Within Amelia* or *Unresolved*.
             - **Single date** shows only conversations whose `conversationCreated` falls on that date.
-            - *Patient Abandoned Before Escalation* currently follows your desktop logic: `abandoned = 1 AND escalated = True`.
+            - *Patient Abandoned Before Escalation* currently follows your current logic: `abandoned = 1 AND escalated = True`.
+            - **Authentication Success** is only counted when the data explicitly contains `authentication = "success"`.
             """
         )
 
