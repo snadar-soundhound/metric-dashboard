@@ -175,12 +175,21 @@ def parse_uploaded_json(uploaded_file) -> list[dict]:
     raise ValueError("Unsupported JSON format: expected a list of conversations or an object containing one.")
 
 
-def parse_date_safe(value: str):
-    if not value:
+def parse_date_safe(value):
+    if value is None or value == "":
         return None
-    parsed = pd.to_datetime(value, errors="coerce", utc=False)
+
+    # Handles epoch timestamps (seconds or ms)
+    if isinstance(value, (int, float)):
+        parsed = pd.to_datetime(value, unit="s", errors="coerce", utc=False)
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(value, unit="ms", errors="coerce", utc=False)
+    else:
+        parsed = pd.to_datetime(value, errors="coerce", utc=False)
+
     if pd.isna(parsed):
         return None
+
     try:
         return parsed.date()
     except Exception:
@@ -221,10 +230,22 @@ def parse_metrics(data: list[dict]) -> dict:
             get_first(metrics_map, ["Caller Number", "CallerNumber", "caller_number"], ""),
         )
 
+        # Correct fields: use exact custom metric keys requested by the user
+        queue_code = get_first(
+            custom_map,
+            ["Queue Code"],
+            get_first(metrics_map, ["Queue Code"], ""),
+        )
+        escalation_number = get_first(
+            custom_map,
+            ["Escalation Number"],
+            get_first(metrics_map, ["Escalation Number"], ""),
+        )
+
         handle_time = normalize_number(
             get_first(
                 metrics_map,
-                ["totalHandleTime", "total_handle_time", "TotalHandleTime", "total_handleTime"],
+                ["totalHandleTime", "total_handle_time", "TotalHandleTime", "total_handleTime", "total_handle_time"],
                 0,
             ),
             0.0,
@@ -241,7 +262,7 @@ def parse_metrics(data: list[dict]) -> dict:
         ).strip()
         channel = str(conv.get("initialChannel", "")).strip()
         conversation_id = str(conv.get("conversationId", "")).strip()
-        created_at = str(conv.get("conversationCreated", "")).strip()
+        created_at = conv.get("conversationCreated", "")
         created_date = parse_date_safe(created_at)
 
         abandoned_num = normalize_number(abandoned, -999)
@@ -279,6 +300,8 @@ def parse_metrics(data: list[dict]) -> dict:
         entry = {
             "caller": str(caller).strip() if caller is not None else "",
             "conversation_id": conversation_id,
+            "queue_code": str(queue_code).strip() if queue_code is not None else "",
+            "escalation_number": str(escalation_number).strip() if escalation_number is not None else "",
             "handle_time": handle_time,
             "handle_time_fmt": fmt_time(handle_time),
             "satisfaction_score": satisfaction,
@@ -287,7 +310,7 @@ def parse_metrics(data: list[dict]) -> dict:
             "resolution_status": resolution_status,
             "intent": user_intent,
             "channel": channel,
-            "created_at": created_at,
+            "created_at": str(created_at),
             "created_date": created_date,
             "auth_values": auth_values,
             "auth_value": auth_status,
@@ -384,6 +407,8 @@ def make_table(entries: list[dict]) -> pd.DataFrame:
             {
                 "Caller Number": entry.get("caller") or "—",
                 "Conversation ID": entry.get("conversation_id") or "—",
+                "Queue Code": entry.get("queue_code") or "—",
+                "Escalation Number": entry.get("escalation_number") or "—",
                 "Intent": (entry.get("intent") or "—").replace("_", " "),
                 "Resolution": entry.get("resolution_status") or "—",
                 "Channel": entry.get("channel") or "—",
@@ -430,6 +455,8 @@ def filter_entries(
             [
                 str(entry.get("caller", "")),
                 str(entry.get("conversation_id", "")),
+                str(entry.get("queue_code", "")),
+                str(entry.get("escalation_number", "")),
                 str(entry.get("intent", "")),
                 str(entry.get("resolution_status", "")),
                 str(entry.get("channel", "")),
@@ -438,8 +465,10 @@ def filter_entries(
                 str(entry.get("under_age_label", "")),
             ]
         ).lower()
+
         if search and search not in haystack:
             continue
+
         out.append(entry)
     return out
 
@@ -602,12 +631,25 @@ def build_pdf_report(
 
     table_df = make_table(filtered_entries)
     max_rows = min(len(table_df), 60)
-    data_rows = [["Caller Number", "Conversation ID", "Intent", "Resolution", "Authentication", "Under 18", "Handle Time", "Created"]]
+    data_rows = [[
+        "Caller Number",
+        "Conversation ID",
+        "Queue Code",
+        "Escalation Number",
+        "Intent",
+        "Resolution",
+        "Authentication",
+        "Under 18",
+        "Handle Time",
+        "Created",
+    ]]
     for _, row in table_df.head(max_rows).iterrows():
         data_rows.append(
             [
                 str(row["Caller Number"]),
                 str(row["Conversation ID"]),
+                str(row["Queue Code"]),
+                str(row["Escalation Number"]),
                 str(row["Intent"]),
                 str(row["Resolution"]),
                 str(row["Authentication"]),
@@ -620,7 +662,7 @@ def build_pdf_report(
     convo_table = Table(
         data_rows,
         repeatRows=1,
-        colWidths=[2.8 * cm, 4.6 * cm, 3.8 * cm, 3.0 * cm, 2.8 * cm, 2.6 * cm, 2.2 * cm, 2.5 * cm],
+        colWidths=[2.5 * cm, 3.8 * cm, 2.6 * cm, 4.5 * cm, 3.2 * cm, 2.8 * cm, 2.6 * cm, 2.1 * cm, 2.1 * cm, 2.4 * cm],
     )
     convo_table.setStyle(
         TableStyle(
@@ -630,7 +672,7 @@ def build_pdf_report(
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
                 ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7DFEA")),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F7FB")]),
-                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.0),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
         )
@@ -691,7 +733,10 @@ def main():
     available_dates = parsed.get("available_dates", [])
 
     with st.sidebar:
-        search = st.text_input("Search", placeholder="Phone, conversation ID, intent...")
+        search = st.text_input(
+            "Search",
+            placeholder="Phone, conversation ID, intent, queue code, escalation number..."
+        )
         selected_key = st.selectbox(
             "Metric focus",
             options=[key for _, key in CATEGORY_OPTIONS],
@@ -856,7 +901,7 @@ def main():
 
         st.subheader(f"Filtered Conversations — {selected_label}")
         st.caption(
-            "Use the sidebar to switch between All or a specific metric, then optionally narrow by date, resolution, channel, intent, authentication state, and under-18 flag."
+            "Use the sidebar to switch between All or a specific metric, then optionally narrow by date, resolution, channel, intent, authentication state, under-18 flag, queue code, or escalation number through search."
         )
         df = make_table(filtered_entries)
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -889,7 +934,10 @@ def main():
 
     with tab_explorer:
         st.subheader("Conversation Explorer")
-        explorer_search = st.text_input("Find a conversation by ID or phone number", key="explorer_search")
+        explorer_search = st.text_input(
+            "Find a conversation by ID, phone number, queue code, or escalation number",
+            key="explorer_search"
+        )
         matching_entries = (
             filter_entries(all_entries, explorer_search, [], [], [], [], [], None)
             if explorer_search
@@ -901,7 +949,15 @@ def main():
         default_idx = 0
         if explorer_search:
             for idx, entry in enumerate(matching_entries):
-                if explorer_search.lower() in str(entry.get("conversation_id", "")).lower():
+                searchable = " ".join(
+                    [
+                        str(entry.get("conversation_id", "")),
+                        str(entry.get("caller", "")),
+                        str(entry.get("queue_code", "")),
+                        str(entry.get("escalation_number", "")),
+                    ]
+                ).lower()
+                if explorer_search.lower() in searchable:
                     default_idx = idx
                     break
 
@@ -923,13 +979,14 @@ def main():
             top1, top2, top3, top4 = st.columns(4)
             top1.metric("Conversation ID", selected_entry.get("conversation_id") or "—")
             top2.metric("Caller Number", selected_entry.get("caller") or "—")
-            top3.metric("Resolution", selected_entry.get("resolution_status") or "—")
-            top4.metric("Handle Time", selected_entry.get("handle_time_fmt") or "—")
+            top3.metric("Queue Code", selected_entry.get("queue_code") or "—")
+            top4.metric("Escalation Number", selected_entry.get("escalation_number") or "—")
 
-            top5, top6, top7 = st.columns(3)
-            top5.metric("Authentication", selected_entry.get("auth_value") or "—")
-            top6.metric("Auth Started", "Yes" if selected_entry.get("auth_started") else "No")
-            top7.metric("Under 18", selected_entry.get("under_age_label") or "Unknown")
+            top5, top6, top7, top8 = st.columns(4)
+            top5.metric("Resolution", selected_entry.get("resolution_status") or "—")
+            top6.metric("Handle Time", selected_entry.get("handle_time_fmt") or "—")
+            top7.metric("Authentication", selected_entry.get("auth_value") or "—")
+            top8.metric("Under 18", selected_entry.get("under_age_label") or "Unknown")
 
             detail_tabs = st.tabs(["Transcript", "Summary", "Metrics", "Topics", "Raw JSON"])
             with detail_tabs[0]:
@@ -939,6 +996,8 @@ def main():
                     {
                         "conversation_id": selected_entry.get("conversation_id"),
                         "caller": selected_entry.get("caller"),
+                        "queue_code": selected_entry.get("queue_code"),
+                        "escalation_number": selected_entry.get("escalation_number"),
                         "intent": selected_entry.get("intent"),
                         "resolution_status": selected_entry.get("resolution_status"),
                         "channel": selected_entry.get("channel"),
@@ -976,6 +1035,7 @@ def main():
             - **Authentication Success** counts rows where `authentication = success` exists.
             - **Authentication %** uses `authentication success / authentication started`.
             - **Under 18** counts rows where `underAge = true`.
+            - **Queue Code** and **Escalation Number** are shown only in the conversation table and search, not in the main KPI dashboard.
             - Older conversations that do not contain the newer authentication metrics are still supported.
             """
         )
