@@ -26,6 +26,7 @@ METRIC_CARDS = [
     ("Authentication Success", "auth_success"),
     ("Authentication %", "auth_percentage"),
     ("Under 18", "under_age_true"),
+    ("User Language", "user_language"),
     ("Avg Handle Time", "avg_handle_time"),
     ("Avg Satisfaction", "avg_satisfaction"),
     ("Avg Answer Speed", "avg_answer_speed"),
@@ -41,6 +42,7 @@ COMPUTED_KEYS = {
     "auth_success",
     "auth_percentage",
     "under_age_true",
+    "user_language",
 }
 
 
@@ -208,6 +210,7 @@ def parse_metrics(data: list[dict]) -> dict:
     day_counts = Counter()
     under_age_counts = Counter()
     auth_value_counts = Counter()
+    language_counts = Counter()
     all_entries = []
 
     for conv in data:
@@ -280,6 +283,18 @@ def parse_metrics(data: list[dict]) -> dict:
         under_age = any(value == "true" for value in under_age_values)
         under_age_label = "Under 18" if under_age else ("18+" if under_age_known else "Unknown")
 
+        user_language_values = normalize_string_list(get_metric_values(conv, ["userLanguage", "UserLanguage", "user_language"]))
+        if user_language_values:
+            user_language_raw = user_language_values[-1]
+            if user_language_raw == "spanish":
+                user_language = "Spanish"
+            elif user_language_raw == "english":
+                user_language = "English"
+            else:
+                user_language = user_language_raw.title()
+        else:
+            user_language = "Unknown"
+
         handle_times.append(handle_time)
         satisfaction_scores.append(satisfaction)
         answer_speeds.append(answer_speed)
@@ -296,6 +311,8 @@ def parse_metrics(data: list[dict]) -> dict:
             under_age_counts[under_age_label] += 1
         if auth_status:
             auth_value_counts[auth_status] += 1
+        if user_language:
+            language_counts[user_language] += 1
 
         entry = {
             "caller": str(caller).strip() if caller is not None else "",
@@ -320,6 +337,7 @@ def parse_metrics(data: list[dict]) -> dict:
             "under_age": under_age,
             "under_age_known": under_age_known,
             "under_age_label": under_age_label,
+            "user_language": user_language,
             "raw": conv,
         }
 
@@ -356,6 +374,7 @@ def parse_metrics(data: list[dict]) -> dict:
         "day_counts": dict(sorted(day_counts.items())),
         "under_age_counts": dict(under_age_counts),
         "auth_value_counts": dict(auth_value_counts),
+        "language_counts": dict(language_counts),
         "available_dates": available_dates,
         "all_entries": all_entries,
     }
@@ -367,8 +386,10 @@ def compute_auth_metrics(entries: list[dict]) -> dict:
     auth_completed_after_start = sum(1 for entry in entries if entry.get("auth_completed_after_start"))
     under_age_true = sum(1 for entry in entries if entry.get("under_age"))
     under_age_known = sum(1 for entry in entries if entry.get("under_age_known"))
+    language_counts = Counter(entry.get("user_language", "Unknown") or "Unknown" for entry in entries)
     auth_percentage = (auth_success / auth_started * 100.0) if auth_started else 0.0
     under_age_percentage = (under_age_true / under_age_known * 100.0) if under_age_known else 0.0
+    top_language = language_counts.most_common(1)[0][0] if language_counts else "Unknown"
     return {
         "auth_started": auth_started,
         "auth_success": auth_success,
@@ -377,6 +398,8 @@ def compute_auth_metrics(entries: list[dict]) -> dict:
         "under_age_true": under_age_true,
         "under_age_known": under_age_known,
         "under_age_percentage": under_age_percentage,
+        "language_counts": dict(language_counts),
+        "top_language": top_language,
     }
 
 
@@ -397,6 +420,8 @@ def entries_for_selected_key(parsed: dict, selected_key: str) -> list[dict]:
         return [entry for entry in parsed["all_entries"] if entry.get("auth_started")]
     if selected_key == "under_age_true":
         return [entry for entry in parsed["all_entries"] if entry.get("under_age")]
+    if selected_key == "user_language":
+        return [entry for entry in parsed["all_entries"] if (entry.get("user_language") or "Unknown") != "Unknown"]
     return list(parsed["metrics"].get(selected_key, []))
 
 
@@ -416,6 +441,7 @@ def make_table(entries: list[dict]) -> pd.DataFrame:
                 "Auth Started": "Yes" if entry.get("auth_started") else "No",
                 "Auth Success": "Yes" if entry.get("auth_success") else "No",
                 "Under 18": entry.get("under_age_label") or "Unknown",
+                "Language": entry.get("user_language") or "Unknown",
                 "Handle Time": entry.get("handle_time_fmt") or "—",
                 "Satisfaction": round(float(entry.get("satisfaction_score", 0)), 3),
                 "Answer Speed": entry.get("answer_speed_fmt") or "—",
@@ -433,6 +459,7 @@ def filter_entries(
     intent_filter: list[str],
     under_age_filter: list[str],
     auth_filter: list[str],
+    language_filter: list[str],
     selected_date,
 ) -> list[dict]:
     search = search.strip().lower()
@@ -447,6 +474,8 @@ def filter_entries(
         if under_age_filter and entry.get("under_age_label") not in under_age_filter:
             continue
         if auth_filter and (entry.get("auth_value") or "none") not in auth_filter:
+            continue
+        if language_filter and (entry.get("user_language") or "Unknown") not in language_filter:
             continue
         if selected_date and entry.get("created_date") != selected_date:
             continue
@@ -463,6 +492,7 @@ def filter_entries(
                 str(entry.get("created_date", "")),
                 str(entry.get("auth_value", "")),
                 str(entry.get("under_age_label", "")),
+                str(entry.get("user_language", "")),
             ]
         ).lower()
 
@@ -490,6 +520,8 @@ def metric_value(parsed: dict, key: str, computed: dict | None = None):
         return f"{computed.get('auth_percentage', 0.0):.1f}%"
     if key == "under_age_true":
         return str(computed.get("under_age_true", 0))
+    if key == "user_language":
+        return computed.get("top_language", "Unknown")
     if key == "all":
         return str(len(parsed["all_entries"]))
     return str(len(parsed["metrics"].get(key, [])))
@@ -510,6 +542,7 @@ def metric_help() -> pd.DataFrame:
             ["Authentication Success", 'Conversation contains authentication = "success"', 'authentication contains "success"'],
             ["Authentication %", "Percent of authentication starts that reached success", "authentication_success / authentication_started"],
             ["Under 18", 'Conversation contains underAge = true', 'underAge = "true"'],
+            ["User Language", 'Language captured from userLanguage custom metric', 'Most common value such as English or Spanish'],
             ["Avg Handle Time", "Average conversation duration", "sum(handle_time) / total conversations"],
             ["Avg Satisfaction", "Average user satisfaction score", "sum(satisfaction_score) / total conversations"],
             ["Avg Answer Speed", "Average Amelia response speed", "sum(amelia_answer_speed) / total conversations"],
@@ -611,6 +644,7 @@ def build_pdf_report(
         ["Authentication %", f"{computed.get('auth_percentage', 0.0):.1f}%"],
         ["Under 18", str(computed.get("under_age_true", 0))],
         ["Under 18 %", f"{computed.get('under_age_percentage', 0.0):.1f}%"],
+        ["Top User Language", str(computed.get("top_language", "Unknown"))],
     ]
     auth_table = Table(auth_rows, colWidths=[8.5 * cm, 4.0 * cm])
     auth_table.setStyle(
@@ -640,6 +674,7 @@ def build_pdf_report(
         "Resolution",
         "Authentication",
         "Under 18",
+        "Language",
         "Handle Time",
         "Created",
     ]]
@@ -654,6 +689,7 @@ def build_pdf_report(
                 str(row["Resolution"]),
                 str(row["Authentication"]),
                 str(row["Under 18"]),
+                str(row["Language"]),
                 str(row["Handle Time"]),
                 str(row["Created"]),
             ]
@@ -662,7 +698,7 @@ def build_pdf_report(
     convo_table = Table(
         data_rows,
         repeatRows=1,
-        colWidths=[2.5 * cm, 3.8 * cm, 2.6 * cm, 4.5 * cm, 3.2 * cm, 2.8 * cm, 2.6 * cm, 2.1 * cm, 2.1 * cm, 2.4 * cm],
+        colWidths=[2.3 * cm, 3.3 * cm, 2.3 * cm, 4.0 * cm, 2.8 * cm, 2.4 * cm, 2.2 * cm, 1.9 * cm, 2.2 * cm, 1.9 * cm, 2.2 * cm],
     )
     convo_table.setStyle(
         TableStyle(
@@ -730,6 +766,7 @@ def main():
         option for option in ["Under 18", "18+", "Unknown"] if any(entry.get("under_age_label") == option for entry in all_entries)
     ]
     auth_options = sorted({entry.get("auth_value") or "none" for entry in all_entries})
+    language_options = sorted({entry.get("user_language") or "Unknown" for entry in all_entries})
     available_dates = parsed.get("available_dates", [])
 
     with st.sidebar:
@@ -758,6 +795,7 @@ def main():
         intent_filter = st.multiselect("Intent", options=intent_options)
         under_age_filter = st.multiselect("Under 18", options=under_age_options)
         auth_filter = st.multiselect("Authentication", options=auth_options)
+        language_filter = st.multiselect("Language", options=language_options)
 
     base_entries = entries_for_selected_key(parsed, selected_key)
     filtered_entries = filter_entries(
@@ -768,6 +806,7 @@ def main():
         intent_filter,
         under_age_filter,
         auth_filter,
+        language_filter,
         selected_date,
     )
     computed = compute_auth_metrics(filtered_entries)
@@ -791,12 +830,13 @@ def main():
             f"Rows: **{len(filtered_entries)}**"
         )
 
-        st.markdown("### Authentication and Underage Summary")
-        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+        st.markdown("### Authentication, Underage, and Language Summary")
+        info_col1, info_col2, info_col3, info_col4, info_col5 = st.columns(5)
         info_col1.metric("Authentication Started", computed["auth_started"])
         info_col2.metric("Authentication Success", computed["auth_success"])
         info_col3.metric("Authentication %", f"{computed['auth_percentage']:.1f}%")
         info_col4.metric("Under 18", computed["under_age_true"])
+        info_col5.metric("Top User Language", computed["top_language"])
         st.caption(
             "Authentication % = authentication success count divided by authentication started count. Older rows without start are safely ignored in the denominator."
         )
@@ -849,20 +889,17 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
 
         with chart_col4:
-            under_age_df = pd.DataFrame(
-                {
-                    "Group": ["Under 18", "18+", "Unknown"],
-                    "Count": [
-                        parsed["under_age_counts"].get("Under 18", 0),
-                        parsed["under_age_counts"].get("18+", 0),
-                        sum(1 for entry in all_entries if not entry.get("under_age_known")),
-                    ],
-                }
+            language_df = pd.DataFrame(
+                sorted(computed["language_counts"].items(), key=lambda item: item[1], reverse=True),
+                columns=["Language", "Count"],
             )
-            fig = px.pie(under_age_df, names="Group", values="Count", title="Underage Distribution", hole=0.35)
-            fig.update_traces(hovertemplate="%{label}: %{value}<extra></extra>")
-            fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            if not language_df.empty:
+                fig = px.pie(language_df, names="Language", values="Count", title="Language Distribution", hole=0.35)
+                fig.update_traces(hovertemplate="%{label}: %{value}<extra></extra>")
+                fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No language data found.")
 
         chart_col5, chart_col6 = st.columns(2)
         with chart_col5:
@@ -939,7 +976,7 @@ def main():
             key="explorer_search"
         )
         matching_entries = (
-            filter_entries(all_entries, explorer_search, [], [], [], [], [], None)
+            filter_entries(all_entries, explorer_search, [], [], [], [], [], [], None)
             if explorer_search
             else all_entries
         )
@@ -982,11 +1019,12 @@ def main():
             top3.metric("Queue Code", selected_entry.get("queue_code") or "—")
             top4.metric("Escalation Number", selected_entry.get("escalation_number") or "—")
 
-            top5, top6, top7, top8 = st.columns(4)
+            top5, top6, top7, top8, top9 = st.columns(5)
             top5.metric("Resolution", selected_entry.get("resolution_status") or "—")
             top6.metric("Handle Time", selected_entry.get("handle_time_fmt") or "—")
             top7.metric("Authentication", selected_entry.get("auth_value") or "—")
             top8.metric("Under 18", selected_entry.get("under_age_label") or "Unknown")
+            top9.metric("Language", selected_entry.get("user_language") or "Unknown")
 
             detail_tabs = st.tabs(["Transcript", "Summary", "Metrics", "Topics", "Raw JSON"])
             with detail_tabs[0]:
@@ -1006,6 +1044,7 @@ def main():
                         "auth_success": selected_entry.get("auth_success"),
                         "under_age": selected_entry.get("under_age"),
                         "under_age_known": selected_entry.get("under_age_known"),
+                        "user_language": selected_entry.get("user_language"),
                         "handle_time": selected_entry.get("handle_time"),
                         "satisfaction_score": selected_entry.get("satisfaction_score"),
                         "answer_speed": selected_entry.get("answer_speed"),
@@ -1035,6 +1074,7 @@ def main():
             - **Authentication Success** counts rows where `authentication = success` exists.
             - **Authentication %** uses `authentication success / authentication started`.
             - **Under 18** counts rows where `underAge = true`.
+            - **User Language** comes from the `userLanguage` custom metric and is shown as a top language KPI plus a language distribution chart.
             - **Queue Code** and **Escalation Number** are shown only in the conversation table and search, not in the main KPI dashboard.
             - Older conversations that do not contain the newer authentication metrics are still supported.
             """
