@@ -1,3 +1,4 @@
+import html
 import json
 from collections import Counter
 from io import BytesIO
@@ -6,6 +7,8 @@ from typing import Any
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+px.defaults.template = "plotly_white"
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -26,6 +29,7 @@ METRIC_CARDS = [
     ("Authentication Success", "auth_success"),
     ("Authentication %", "auth_percentage"),
     ("Under 18", "under_age_true"),
+    ("On Behalf", "on_behalf_true"),
     ("User Language", "user_language"),
     ("Avg Handle Time", "avg_handle_time"),
     ("Avg Satisfaction", "avg_satisfaction"),
@@ -42,6 +46,7 @@ COMPUTED_KEYS = {
     "auth_success",
     "auth_percentage",
     "under_age_true",
+    "on_behalf_true",
     "user_language",
 }
 
@@ -209,6 +214,7 @@ def parse_metrics(data: list[dict]) -> dict:
     channel_counts = Counter()
     day_counts = Counter()
     under_age_counts = Counter()
+    on_behalf_counts = Counter()
     auth_value_counts = Counter()
     language_counts = Counter()
     all_entries = []
@@ -283,6 +289,10 @@ def parse_metrics(data: list[dict]) -> dict:
         under_age = any(value == "true" for value in under_age_values)
         under_age_label = "Under 18" if under_age else ("18+" if under_age_known else "Unknown")
 
+        on_behalf_values = get_metric_values(conv, ["On Behalf", "OnBehalf", "onBehalf", "on_behalf"])
+        on_behalf = any(normalize_bool(value) for value in on_behalf_values)
+        on_behalf_label = "Yes" if on_behalf else "No"
+
         user_language_values = normalize_string_list(get_metric_values(conv, ["userLanguage", "UserLanguage", "user_language"]))
         if user_language_values:
             user_language_raw = user_language_values[-1]
@@ -309,6 +319,8 @@ def parse_metrics(data: list[dict]) -> dict:
             day_counts[str(created_date)] += 1
         if under_age_known:
             under_age_counts[under_age_label] += 1
+        if on_behalf:
+            on_behalf_counts["On Behalf"] += 1
         if auth_status:
             auth_value_counts[auth_status] += 1
         if user_language:
@@ -337,6 +349,8 @@ def parse_metrics(data: list[dict]) -> dict:
             "under_age": under_age,
             "under_age_known": under_age_known,
             "under_age_label": under_age_label,
+            "on_behalf": on_behalf,
+            "on_behalf_label": on_behalf_label,
             "user_language": user_language,
             "raw": conv,
         }
@@ -373,6 +387,7 @@ def parse_metrics(data: list[dict]) -> dict:
         "channel_counts": dict(channel_counts),
         "day_counts": dict(sorted(day_counts.items())),
         "under_age_counts": dict(under_age_counts),
+        "on_behalf_counts": dict(on_behalf_counts),
         "auth_value_counts": dict(auth_value_counts),
         "language_counts": dict(language_counts),
         "available_dates": available_dates,
@@ -386,6 +401,7 @@ def compute_auth_metrics(entries: list[dict]) -> dict:
     auth_completed_after_start = sum(1 for entry in entries if entry.get("auth_completed_after_start"))
     under_age_true = sum(1 for entry in entries if entry.get("under_age"))
     under_age_known = sum(1 for entry in entries if entry.get("under_age_known"))
+    on_behalf_true = sum(1 for entry in entries if entry.get("on_behalf"))
     language_counts = Counter(entry.get("user_language", "Unknown") or "Unknown" for entry in entries)
     auth_percentage = (auth_success / auth_started * 100.0) if auth_started else 0.0
     under_age_percentage = (under_age_true / under_age_known * 100.0) if under_age_known else 0.0
@@ -398,6 +414,7 @@ def compute_auth_metrics(entries: list[dict]) -> dict:
         "under_age_true": under_age_true,
         "under_age_known": under_age_known,
         "under_age_percentage": under_age_percentage,
+        "on_behalf_true": on_behalf_true,
         "language_counts": dict(language_counts),
         "top_language": top_language,
     }
@@ -420,6 +437,8 @@ def entries_for_selected_key(parsed: dict, selected_key: str) -> list[dict]:
         return [entry for entry in parsed["all_entries"] if entry.get("auth_started")]
     if selected_key == "under_age_true":
         return [entry for entry in parsed["all_entries"] if entry.get("under_age")]
+    if selected_key == "on_behalf_true":
+        return [entry for entry in parsed["all_entries"] if entry.get("on_behalf")]
     if selected_key == "user_language":
         return [entry for entry in parsed["all_entries"] if (entry.get("user_language") or "Unknown") != "Unknown"]
     return list(parsed["metrics"].get(selected_key, []))
@@ -441,6 +460,7 @@ def make_table(entries: list[dict]) -> pd.DataFrame:
                 "Auth Started": "Yes" if entry.get("auth_started") else "No",
                 "Auth Success": "Yes" if entry.get("auth_success") else "No",
                 "Under 18": entry.get("under_age_label") or "Unknown",
+                "On Behalf": entry.get("on_behalf_label") or "No",
                 "Language": entry.get("user_language") or "Unknown",
                 "Handle Time": entry.get("handle_time_fmt") or "—",
                 "Satisfaction": round(float(entry.get("satisfaction_score", 0)), 3),
@@ -492,6 +512,7 @@ def filter_entries(
                 str(entry.get("created_date", "")),
                 str(entry.get("auth_value", "")),
                 str(entry.get("under_age_label", "")),
+                str(entry.get("on_behalf_label", "")),
                 str(entry.get("user_language", "")),
             ]
         ).lower()
@@ -520,6 +541,8 @@ def metric_value(parsed: dict, key: str, computed: dict | None = None):
         return f"{computed.get('auth_percentage', 0.0):.1f}%"
     if key == "under_age_true":
         return str(computed.get("under_age_true", 0))
+    if key == "on_behalf_true":
+        return str(computed.get("on_behalf_true", 0))
     if key == "user_language":
         return computed.get("top_language", "Unknown")
     if key == "all":
@@ -542,6 +565,7 @@ def metric_help() -> pd.DataFrame:
             ["Authentication Success", 'Conversation contains authentication = "success"', 'authentication contains "success"'],
             ["Authentication %", "Percent of authentication starts that reached success", "authentication_success / authentication_started"],
             ["Under 18", 'Conversation contains underAge = true', 'underAge = "true"'],
+            ["On Behalf", 'Caller stated or implied they are calling for another patient', 'On Behalf = "true"'],
             ["User Language", 'Language captured from userLanguage custom metric', 'Most common value such as English or Spanish'],
             ["Avg Handle Time", "Average conversation duration", "sum(handle_time) / total conversations"],
             ["Avg Satisfaction", "Average user satisfaction score", "sum(satisfaction_score) / total conversations"],
@@ -551,12 +575,37 @@ def metric_help() -> pd.DataFrame:
     )
 
 
+def render_table(df: pd.DataFrame, max_height: int = 420):
+    """Render a browser-independent light table so dark browser/OS themes cannot invert it."""
+    if df is None or df.empty:
+        st.info("No rows to display.")
+        return
+
+    safe = df.copy()
+    safe = safe.astype(str).replace({"nan": "—", "None": "—", "NaT": "—"})
+    header = "".join(f"<th>{html.escape(str(col))}</th>" for col in safe.columns)
+    rows = []
+    for _, row in safe.iterrows():
+        cells = "".join(f"<td>{html.escape(str(value))}</td>" for value in row)
+        rows.append(f"<tr>{cells}</tr>")
+
+    table_html = f"""
+    <div class="table-wrap" style="max-height:{max_height}px;">
+      <table class="light-table">
+        <thead><tr>{header}</tr></thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def kpi_card(label: str, value: str):
     st.markdown(
         f"""
-        <div style="padding:14px 16px;border:1px solid #2A2D3E;border-radius:14px;background:#1A1D27;min-height:104px;">
-            <div style="font-size:12px;color:#A0A4B8;margin-bottom:8px;">{label}</div>
-            <div style="font-size:28px;font-weight:700;color:#FFFFFF;">{value}</div>
+        <div class="kpi-card">
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value">{value}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -568,21 +617,187 @@ def add_theme():
     st.markdown(
         """
         <style>
-        .stApp { background: #0F1117; color: white; }
-        [data-testid="stSidebar"] { background: #141824; }
-        .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
-        .stTabs [data-baseweb="tab-list"] { gap: 12px; }
+        :root {
+            --app-bg: #F6F8FC;
+            --panel-bg: #FFFFFF;
+            --text-main: #0F172A;
+            --text-muted: #475569;
+            --border: #CBD5E1;
+            --accent: #EF4444;
+            --info-bg: #E0F2FE;
+        }
+        html, body, .stApp, [data-testid="stAppViewContainer"] {
+            background: var(--app-bg) !important;
+            color: var(--text-main) !important;
+        }
+        [data-testid="stHeader"], header { background: var(--app-bg) !important; }
+        [data-testid="stSidebar"], [data-testid="stSidebarContent"] {
+            background: var(--panel-bg) !important;
+            color: var(--text-main) !important;
+            border-right: 1px solid #E2E8F0;
+        }
+        .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1500px; }
+        h1, h2, h3, h4, h5, h6, p, label, span, div, small { color: var(--text-main); }
+        .stCaptionContainer, [data-testid="stMarkdownContainer"] p, [data-testid="stWidgetLabel"] { color: var(--text-muted) !important; }
+        h1, h2, h3 { letter-spacing: -0.02em; }
+        .stTabs [data-baseweb="tab-list"] { gap: 12px; border-bottom: 1px solid #E2E8F0; }
         .stTabs [data-baseweb="tab"] {
-            background: #1A1D27; border-radius: 10px; padding: 8px 14px; border: 1px solid #2A2D3E;
+            background: var(--panel-bg) !important;
+            border-radius: 10px 10px 0 0;
+            padding: 10px 16px;
+            border: 1px solid var(--border);
+            border-bottom: none;
+            color: var(--text-main) !important;
         }
-        div[data-testid="stMetric"] {
-            background: #1A1D27; border: 1px solid #2A2D3E; padding: 10px; border-radius: 14px;
+        .stTabs [aria-selected="true"] { border-bottom: 3px solid var(--accent) !important; }
+        .stTabs [data-baseweb="tab"] p { color: var(--text-main) !important; }
+        .kpi-card, div[data-testid="stMetric"] {
+            background: var(--panel-bg) !important;
+            border: 1px solid #D7DEE8 !important;
+            border-radius: 14px !important;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07);
         }
+        .kpi-card { padding: 16px 18px; min-height: 104px; }
+        .kpi-label { font-size: 12px; color: var(--text-muted) !important; margin-bottom: 10px; font-weight: 500; }
+        .kpi-value { font-size: 28px; font-weight: 800; color: var(--text-main) !important; }
+        div[data-testid="stMetric"] { padding: 12px 14px; }
+        div[data-testid="stMetric"] label, div[data-testid="stMetric"] [data-testid="stMetricValue"], div[data-testid="stMetric"] [data-testid="stMetricLabel"] { color: var(--text-main) !important; }
+        input, textarea, select, [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="textarea"] textarea {
+            background: #FFFFFF !important;
+            color: var(--text-main) !important;
+            border-color: var(--border) !important;
+        }
+        input::placeholder, textarea::placeholder { color: #64748B !important; opacity: 1 !important; }
+        [data-baseweb="select"] span, [data-baseweb="select"] div { color: var(--text-main) !important; }
+        [data-testid="stFileUploader"] section {
+            background: #F8FAFC !important;
+            border: 1px dashed #94A3B8 !important;
+            border-radius: 12px !important;
+        }
+        [data-testid="stFileUploader"] section * { color: var(--text-main) !important; }
+        [data-testid="stFileUploader"] button, .stDownloadButton button {
+            background: #FFFFFF !important;
+            color: var(--accent) !important;
+            border: 1px solid var(--accent) !important;
+            border-radius: 8px !important;
+        }
+        [data-testid="stAlert"] {
+            background: var(--info-bg) !important;
+            border: 1px solid #BAE6FD !important;
+            color: var(--text-main) !important;
+            border-radius: 8px !important;
+        }
+        [data-testid="stAlert"] * { color: var(--text-main) !important; }
+        .stDataFrame, div[data-testid="stTable"], [data-testid="stDataFrame"] {
+            background: #FFFFFF !important;
+            color: var(--text-main) !important;
+        }
+
+
+        .table-wrap {
+            overflow: auto;
+            border: 1px solid #CBD5E1;
+            border-radius: 12px;
+            background: #FFFFFF;
+            box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+            margin-top: 8px;
+        }
+        .light-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 13px;
+            color: #0F172A !important;
+            background: #FFFFFF !important;
+            min-width: 1100px;
+        }
+        .light-table th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #EAF1FB !important;
+            color: #0F172A !important;
+            text-align: left;
+            font-weight: 700;
+            padding: 10px 12px;
+            border-bottom: 1px solid #CBD5E1;
+            white-space: nowrap;
+        }
+        .light-table td {
+            padding: 9px 12px;
+            border-bottom: 1px solid #E2E8F0;
+            border-right: 1px solid #EEF2F7;
+            color: #111827 !important;
+            background: #FFFFFF !important;
+            white-space: nowrap;
+        }
+        .light-table tbody tr:nth-child(even) td { background: #F8FAFC !important; }
+        .light-table tbody tr:hover td { background: #EFF6FF !important; }
+
+        /* Force Plotly charts and toolbar to stay readable in browser dark mode. */
+        .js-plotly-plot, .plot-container, .svg-container {
+            background: #FFFFFF !important;
+        }
+        .modebar {
+            background: rgba(255, 255, 255, 0.92) !important;
+            border: 1px solid #CBD5E1 !important;
+            border-radius: 8px !important;
+            padding: 2px 4px !important;
+        }
+        .modebar-btn svg path {
+            fill: #334155 !important;
+        }
+        .modebar-btn:hover {
+            background: #E2E8F0 !important;
+        }
+        hr { border-color: #E2E8F0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+
+def apply_chart_theme(fig, height: int = 420, tickangle: int | None = None):
+    """Make Plotly charts readable in light mode, including dark-browser environments."""
+    fig.update_layout(
+        template="plotly_white",
+        height=height,
+        margin=dict(l=20, r=20, t=70, b=80),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(color="#0F172A", size=13),
+        title=dict(font=dict(color="#0F172A", size=18), x=0.02, xanchor="left"),
+        xaxis=dict(
+            color="#0F172A",
+            title_font=dict(color="#0F172A", size=13),
+            tickfont=dict(color="#334155", size=12),
+            gridcolor="#E2E8F0",
+            linecolor="#CBD5E1",
+            zerolinecolor="#CBD5E1",
+            automargin=True,
+        ),
+        yaxis=dict(
+            color="#0F172A",
+            title_font=dict(color="#0F172A", size=13),
+            tickfont=dict(color="#334155", size=12),
+            gridcolor="#E2E8F0",
+            linecolor="#CBD5E1",
+            zerolinecolor="#CBD5E1",
+            automargin=True,
+        ),
+        legend=dict(font=dict(color="#0F172A", size=12), bgcolor="rgba(255,255,255,0.75)"),
+        hoverlabel=dict(bgcolor="#FFFFFF", font_color="#0F172A", bordercolor="#CBD5E1"),
+        modebar=dict(bgcolor="rgba(255,255,255,0.92)", color="#334155", activecolor="#EF4444"),
+    )
+    if tickangle is not None:
+        fig.update_xaxes(tickangle=tickangle)
+    fig.update_traces(textfont=dict(color="#FFFFFF", size=12))
+    return fig
+
+PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+}
 
 def build_pdf_report(
     parsed: dict,
@@ -644,6 +859,7 @@ def build_pdf_report(
         ["Authentication %", f"{computed.get('auth_percentage', 0.0):.1f}%"],
         ["Under 18", str(computed.get("under_age_true", 0))],
         ["Under 18 %", f"{computed.get('under_age_percentage', 0.0):.1f}%"],
+        ["On Behalf", str(computed.get("on_behalf_true", 0))],
         ["Top User Language", str(computed.get("top_language", "Unknown"))],
     ]
     auth_table = Table(auth_rows, colWidths=[8.5 * cm, 4.0 * cm])
@@ -748,7 +964,7 @@ def main():
 
     if not uploaded:
         st.info("Upload a JSON file from the sidebar to generate the dashboard.")
-        st.dataframe(metric_help(), use_container_width=True, hide_index=True)
+        render_table(metric_help(), max_height=320)
         return
 
     try:
@@ -830,13 +1046,14 @@ def main():
             f"Rows: **{len(filtered_entries)}**"
         )
 
-        st.markdown("### Authentication, Underage, and Language Summary")
-        info_col1, info_col2, info_col3, info_col4, info_col5 = st.columns(5)
+        st.markdown("### Authentication, Underage, On Behalf, and Language Summary")
+        info_col1, info_col2, info_col3, info_col4, info_col5, info_col6 = st.columns(6)
         info_col1.metric("Authentication Started", computed["auth_started"])
         info_col2.metric("Authentication Success", computed["auth_success"])
         info_col3.metric("Authentication %", f"{computed['auth_percentage']:.1f}%")
         info_col4.metric("Under 18", computed["under_age_true"])
-        info_col5.metric("Top User Language", computed["top_language"])
+        info_col5.metric("On Behalf", computed["on_behalf_true"])
+        info_col6.metric("Top User Language", computed["top_language"])
         st.caption(
             "Authentication % = authentication success count divided by authentication started count. Older rows without start are safely ignored in the denominator."
         )
@@ -862,14 +1079,14 @@ def main():
         with chart_col1:
             fig = px.pie(call_dist, names="Category", values="Count", title="Call Distribution", hole=0.35)
             fig.update_traces(hovertemplate="%{label}: %{value}<extra></extra>")
-            fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            apply_chart_theme(fig, height=420, tickangle=-20)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         with chart_col2:
             fig = px.bar(call_dist, x="Category", y="Count", title="Volume by Category", text_auto=True)
             fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
-            fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            apply_chart_theme(fig, height=420)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         chart_col3, chart_col4 = st.columns(2)
         with chart_col3:
@@ -885,8 +1102,8 @@ def main():
             )
             fig = px.bar(auth_df, x="Stage", y="Value", title="Authentication Funnel", text_auto=True)
             fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
-            fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            apply_chart_theme(fig, height=420)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         with chart_col4:
             language_df = pd.DataFrame(
@@ -896,8 +1113,8 @@ def main():
             if not language_df.empty:
                 fig = px.pie(language_df, names="Language", values="Count", title="Language Distribution", hole=0.35)
                 fig.update_traces(hovertemplate="%{label}: %{value}<extra></extra>")
-                fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                apply_chart_theme(fig, height=420)
+                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info("No language data found.")
 
@@ -915,33 +1132,41 @@ def main():
             )
             fig = px.bar(resolution_df, x="Resolution", y="Count", title="Resolution Status", text_auto=True)
             fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
-            fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            apply_chart_theme(fig, height=420)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         with chart_col6:
             top_intents = sorted(parsed["intent_counts"].items(), key=lambda item: item[1], reverse=True)[:8]
             intent_df = pd.DataFrame(top_intents, columns=["Intent", "Count"])
             if not intent_df.empty:
-                fig = px.bar(intent_df, x="Intent", y="Count", title="Top Intent Distribution", text_auto=True)
-                fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
-                fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                intent_df = intent_df.sort_values("Count", ascending=True)
+                fig = px.bar(intent_df, x="Count", y="Intent", orientation="h", title="Top Intent Distribution", text_auto=True)
+                fig.update_traces(hovertemplate="%{y}: %{x}<extra></extra>", textposition="outside")
+                apply_chart_theme(fig, height=460)
+                fig.update_layout(margin=dict(l=170, r=40, t=70, b=50))
+                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
             else:
                 st.info("No intent data found.")
 
         trend_df = pd.DataFrame(list(parsed["day_counts"].items()), columns=["Day", "Conversations"])
         if not trend_df.empty:
-            fig = px.line(trend_df, x="Day", y="Conversations", markers=True, title="Conversation Trend by Day")
-            fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
-            fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            trend_df["Day"] = pd.to_datetime(trend_df["Day"], errors="coerce").dt.strftime("%b %d, %Y")
+            if len(trend_df) <= 2:
+                fig = px.bar(trend_df, x="Day", y="Conversations", title="Conversation Volume by Day", text_auto=True)
+                fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>")
+            else:
+                fig = px.line(trend_df, x="Day", y="Conversations", markers=True, title="Conversation Volume by Day")
+                fig.update_traces(hovertemplate="%{x}: %{y}<extra></extra>", line=dict(width=3), marker=dict(size=8))
+            apply_chart_theme(fig, height=360, tickangle=0)
+            fig.update_yaxes(rangemode="tozero", dtick=1 if trend_df["Conversations"].max() <= 10 else None)
+            st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
         st.subheader(f"Filtered Conversations — {selected_label}")
         st.caption(
             "Use the sidebar to switch between All or a specific metric, then optionally narrow by date, resolution, channel, intent, authentication state, under-18 flag, queue code, or escalation number through search."
         )
         df = make_table(filtered_entries)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        render_table(df, max_height=520)
 
         action_col1, action_col2 = st.columns([1, 1])
         with action_col1:
@@ -981,7 +1206,7 @@ def main():
             else all_entries
         )
         explorer_df = make_table(matching_entries)
-        st.dataframe(explorer_df, use_container_width=True, hide_index=True, height=320)
+        render_table(explorer_df, max_height=320)
 
         default_idx = 0
         if explorer_search:
@@ -1019,12 +1244,13 @@ def main():
             top3.metric("Queue Code", selected_entry.get("queue_code") or "—")
             top4.metric("Escalation Number", selected_entry.get("escalation_number") or "—")
 
-            top5, top6, top7, top8, top9 = st.columns(5)
+            top5, top6, top7, top8, top9, top10 = st.columns(6)
             top5.metric("Resolution", selected_entry.get("resolution_status") or "—")
             top6.metric("Handle Time", selected_entry.get("handle_time_fmt") or "—")
             top7.metric("Authentication", selected_entry.get("auth_value") or "—")
             top8.metric("Under 18", selected_entry.get("under_age_label") or "Unknown")
-            top9.metric("Language", selected_entry.get("user_language") or "Unknown")
+            top9.metric("On Behalf", selected_entry.get("on_behalf_label") or "No")
+            top10.metric("Language", selected_entry.get("user_language") or "Unknown")
 
             detail_tabs = st.tabs(["Transcript", "Summary", "Metrics", "Topics", "Raw JSON"])
             with detail_tabs[0]:
@@ -1044,6 +1270,7 @@ def main():
                         "auth_success": selected_entry.get("auth_success"),
                         "under_age": selected_entry.get("under_age"),
                         "under_age_known": selected_entry.get("under_age_known"),
+                        "on_behalf": selected_entry.get("on_behalf"),
                         "user_language": selected_entry.get("user_language"),
                         "handle_time": selected_entry.get("handle_time"),
                         "satisfaction_score": selected_entry.get("satisfaction_score"),
@@ -1062,7 +1289,7 @@ def main():
 
     with tab_definitions:
         st.subheader("Metric Definitions")
-        st.dataframe(metric_help(), use_container_width=True, hide_index=True)
+        render_table(metric_help(), max_height=320)
         st.markdown(
             """
             **Notes**
@@ -1074,6 +1301,7 @@ def main():
             - **Authentication Success** counts rows where `authentication = success` exists.
             - **Authentication %** uses `authentication success / authentication started`.
             - **Under 18** counts rows where `underAge = true`.
+            - **On Behalf** counts rows where the custom metric `On Behalf` is `true`; missing values are treated as not on behalf.
             - **User Language** comes from the `userLanguage` custom metric and is shown as a top language KPI plus a language distribution chart.
             - **Queue Code** and **Escalation Number** are shown only in the conversation table and search, not in the main KPI dashboard.
             - Older conversations that do not contain the newer authentication metrics are still supported.
